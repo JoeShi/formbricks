@@ -6,6 +6,7 @@
     }
   ],
   "javascript.updateImportsOnFileMove.enabled": "always",
+  "prisma.pinToPrisma6": true,
   "sonarlint.connectedMode.project": {
     "connectionId": "formbricks",
     "projectKey": "formbricks_formbricks"

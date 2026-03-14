@@ -1,6 +1,6 @@
 "use client";
 
-import { InboxIcon, PresentationIcon } from "lucide-react";
+import { InboxIcon, PresentationIcon, SparklesIcon } from "lucide-react";
 import { usePathname } from "next/navigation";
 import { useTranslation } from "react-i18next";
 import { TSurvey } from "@formbricks/types/surveys/types";
@@ -40,6 +40,16 @@ export const SurveyAnalysisNavigation = ({
       icon: <InboxIcon className="h-5 w-5" />,
       href: `${url}/responses?referer=true`,
       current: pathname?.includes("/responses"),
+      onClick: () => {
+        revalidateSurveyIdPath(environmentId, survey.id);
+      },
+    },
+    {
+      id: "ai-summary",
+      label: t("common.ai_summary"),
+      icon: <SparklesIcon className="h-5 w-5" />,
+      href: `${url}/ai-summary?referer=true`,
+      current: pathname?.includes("/ai-summary"),
       onClick: () => {
         revalidateSurveyIdPath(environmentId, survey.id);
       },
