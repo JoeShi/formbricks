@@ -1,6 +1,6 @@
 # 实施计划
 
-- [ ] 1. 编写缺陷条件探索测试
+- [x] 1. 编写缺陷条件探索测试
   - **Property 1: Bug Condition** - 成功保存后缺少 router.refresh() 调用
   - **重要**：在实施修复之前编写此 property-based 测试
   - **关键**：此测试必须在未修复代码上失败——失败确认缺陷存在
@@ -21,7 +21,7 @@
   - 当测试编写完成、运行并记录失败后，标记任务完成
   - _Requirements: 1.1, 1.2_
 
-- [ ] 2. 编写保持性属性测试（在实施修复之前）
+- [x] 2. 编写保持性属性测试（在实施修复之前）
   - **Property 2: Preservation** - 现有刷新行为和错误处理路径保持不变
   - **重要**：遵循观察优先方法论
   - 观察：`ThemeStyling.onReset` 在 `updateProjectAction` 成功后调用 `router.refresh()`（未修复代码上已存在）
@@ -37,9 +37,9 @@
   - 当观察完成并记录基线行为后，标记任务完成
   - _Requirements: 3.1, 3.2, 3.3, 3.4_
 
-- [ ] 3. 修复预览实时同步缺陷
+- [x] 3. 修复预览实时同步缺陷
 
-  - [ ] 3.1 在 `edit-logo.tsx` 中添加 `router.refresh()` 调用
+  - [x] 3.1 在 `edit-logo.tsx` 中添加 `router.refresh()` 调用
     - 从 `next/navigation` 导入 `useRouter`
     - 在 `EditLogo` 组件中添加 `const router = useRouter()`
     - 在 `saveChanges` 函数的 `updateProjectResponse?.data` 为真的分支中，`toast.success()` 之后添加 `router.refresh()`
@@ -49,7 +49,7 @@
     - _Preservation: 错误处理路径不变，ThemeStyling 的 form.watch() 和 onReset 行为不变_
     - _Requirements: 1.1, 2.1, 3.1, 3.2, 3.4_
 
-  - [ ] 3.2 在 `edit-branding.tsx` 中添加 `router.refresh()` 调用
+  - [x] 3.2 在 `edit-branding.tsx` 中添加 `router.refresh()` 调用
     - 从 `next/navigation` 导入 `useRouter`
     - 在 `EditBranding` 组件中添加 `const router = useRouter()`
     - 在 `toggleBranding` 函数的 `updateBrandingResponse?.data` 为真的分支中，`toast.success()` 之后添加 `router.refresh()`
@@ -58,7 +58,7 @@
     - _Preservation: 错误处理路径不变，切换失败时仅显示 toast 错误提示_
     - _Requirements: 1.2, 2.2, 3.4_
 
-  - [ ] 3.3 验证缺陷条件探索测试现在通过
+  - [x] 3.3 验证缺陷条件探索测试现在通过
     - **Property 1: Expected Behavior** - 成功保存后触发页面刷新
     - **重要**：重新运行任务 1 中的相同测试——不要编写新测试
     - 任务 1 中的测试编码了期望行为
@@ -68,7 +68,7 @@
     - **预期结果**：测试通过（确认缺陷已修复）
     - _Requirements: 2.1, 2.2_
 
-  - [ ] 3.4 验证保持性测试仍然通过
+  - [x] 3.4 验证保持性测试仍然通过
     - **Property 2: Preservation** - 现有刷新行为和错误处理路径保持不变
     - **重要**：重新运行任务 2 中的相同验证——不要编写新测试
     - 通过代码审查验证：`theme-styling.tsx` 未被修改，`onReset` 的 `router.refresh()` 和 `form.watch()` 实时预览行为不变
@@ -76,7 +76,7 @@
     - **预期结果**：所有保持性验证通过（确认无回归）
     - 确认所有测试在修复后仍然通过（无回归）
 
-- [ ] 4. 检查点 - 确保所有验证通过
+- [x] 4. 检查点 - 确保所有验证通过
   - 确保所有代码审查验证通过
   - 运行 `pnpm build` 确认构建无错误
   - 如有疑问，询问用户
