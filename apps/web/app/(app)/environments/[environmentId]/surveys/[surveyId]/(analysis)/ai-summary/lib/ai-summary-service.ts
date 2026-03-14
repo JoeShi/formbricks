@@ -20,7 +20,7 @@ const MODEL_ID = process.env.BEDROCK_MODEL_ID || "us.anthropic.claude-sonnet-4-6
 const CACHE_TTL_MS = 3_600_000; // 1 hour
 const SAMPLING_THRESHOLD = 500;
 const MAX_SERIALIZED_BYTES = 100_000; // 100 KB
-const TIMEOUT_MS = 30_000;
+const TIMEOUT_MS = 180_000;
 
 /**
  * Validate that all required AWS environment variables are set.
@@ -113,6 +113,8 @@ Provide your analysis as a JSON object with:
  * Uses Amazon Bedrock Claude Sonnet 4.6 via Vercel AI SDK.
  */
 export async function generateAiSummary(surveyId: string, skipCache?: boolean): Promise<TStructuredSummary> {
+  logger.info({ surveyId, skipCache }, "AI summary generation started");
+
   // 1. Validate environment variables
   const missing = getMissingEnvVars();
   if (missing.length > 0) {
@@ -123,6 +125,7 @@ export async function generateAiSummary(surveyId: string, skipCache?: boolean): 
 
   // 2. If not skipping cache, try cache first via withCache
   if (!skipCache) {
+    logger.info({ surveyId }, "Attempting to retrieve AI summary from cache");
     return cache.withCache(() => generateFreshSummary(surveyId), cacheKey, CACHE_TTL_MS);
   }
 
@@ -130,6 +133,7 @@ export async function generateAiSummary(surveyId: string, skipCache?: boolean): 
   const fresh = await generateFreshSummary(surveyId);
   try {
     await cache.set(cacheKey, fresh, CACHE_TTL_MS);
+    logger.info({ surveyId }, "AI summary cached successfully");
   } catch (cacheError) {
     logger.warn({ cacheError, surveyId }, "Failed to write AI summary to cache");
   }
@@ -137,11 +141,14 @@ export async function generateAiSummary(surveyId: string, skipCache?: boolean): 
 }
 
 async function generateFreshSummary(surveyId: string): Promise<TStructuredSummary> {
+  const startTime = Date.now();
+
   // Fetch survey
   const survey = await getSurvey(surveyId);
   if (!survey) {
     throw new Error(`Survey not found: ${surveyId}`);
   }
+  logger.info({ surveyId, surveyName: survey.name }, "Survey fetched for AI summary");
 
   // Fetch responses
   const responses = await prisma.response.findMany({
@@ -159,6 +166,8 @@ async function generateFreshSummary(surveyId: string): Promise<TStructuredSummar
     throw new Error("No responses available to generate an AI summary.");
   }
 
+  logger.info({ surveyId, responseCount: responses.length }, "Responses fetched for AI summary");
+
   // Extract questions from survey blocks
   const elements = getElementsFromBlocks(survey.blocks);
   const questions = elements.map((el) => ({
@@ -173,6 +182,13 @@ async function generateFreshSummary(surveyId: string): Promise<TStructuredSummar
 
   const sampled = needsSampling ? sampleResponses(responses, SAMPLING_THRESHOLD) : responses;
 
+  if (needsSampling) {
+    logger.info(
+      { surveyId, totalResponses: responses.length, sampledResponses: sampled.length },
+      "Responses sampled for AI summary"
+    );
+  }
+
   const responseData = sampled.map((r) => ({
     data: r.data as Record<string, unknown>,
     finished: r.finished,
@@ -184,6 +200,11 @@ async function generateFreshSummary(surveyId: string): Promise<TStructuredSummar
     questions,
     responseData,
     needsSampling ? responses.length : undefined
+  );
+
+  logger.info(
+    { surveyId, promptLength: prompt.length, modelId: MODEL_ID },
+    "Calling Amazon Bedrock for AI summary"
   );
 
   // Call Amazon Bedrock
@@ -201,6 +222,12 @@ async function generateFreshSummary(surveyId: string): Promise<TStructuredSummar
       abortSignal: AbortSignal.timeout(TIMEOUT_MS),
     });
 
+    const durationMs = Date.now() - startTime;
+    logger.info(
+      { surveyId, durationMs, themesCount: object.keyThemes.length },
+      "AI summary generation completed"
+    );
+
     // Attach metadata
     return {
       ...object,
@@ -211,8 +238,9 @@ async function generateFreshSummary(surveyId: string): Promise<TStructuredSummar
       },
     };
   } catch (error) {
+    const durationMs = Date.now() - startTime;
     const message = error instanceof Error ? error.message : "Unknown AI generation error";
-    logger.error({ error, surveyId }, "AI summary generation failed");
+    logger.error({ error, surveyId, durationMs }, "AI summary generation failed");
     throw new Error(`AI summary generation failed: ${message}`);
   }
 }
