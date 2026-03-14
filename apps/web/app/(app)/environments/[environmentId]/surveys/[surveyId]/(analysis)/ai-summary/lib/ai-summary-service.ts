@@ -1,6 +1,6 @@
 import "server-only";
 import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
-import { generateObject } from "ai";
+import { NoObjectGeneratedError, generateObject } from "ai";
 import { createCacheKey } from "@formbricks/cache";
 import { prisma } from "@formbricks/database";
 import { logger } from "@formbricks/logger";
@@ -217,7 +217,7 @@ async function generateFreshSummary(surveyId: string): Promise<TStructuredSummar
   try {
     const { object } = await generateObject({
       model: bedrock(MODEL_ID),
-      schema: ZStructuredSummary,
+      schema: ZStructuredSummary.omit({ metadata: true }),
       prompt,
       abortSignal: AbortSignal.timeout(TIMEOUT_MS),
     });
@@ -228,7 +228,6 @@ async function generateFreshSummary(surveyId: string): Promise<TStructuredSummar
       "AI summary generation completed"
     );
 
-    // Attach metadata
     return {
       ...object,
       metadata: {
@@ -238,6 +237,65 @@ async function generateFreshSummary(surveyId: string): Promise<TStructuredSummar
       },
     };
   } catch (error) {
+    // When the model returns valid JSON but with stringified nested fields,
+    // generateObject throws NoObjectGeneratedError with the raw value attached.
+    if (NoObjectGeneratedError.isInstance(error)) {
+      logger.warn(
+        { surveyId, hasText: !!error.text, hasCause: !!error.cause },
+        "generateObject schema validation failed, attempting manual parse"
+      );
+
+      // Try to recover from the raw response — either from error.text or the
+      // already-parsed-but-invalid value inside the cause chain.
+      let raw: Record<string, unknown> | null = null;
+
+      // Strategy 1: parse error.text (the raw JSON string from the model)
+      if (error.text) {
+        try {
+          const jsonStr = error.text.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "");
+          raw = JSON.parse(jsonStr) as Record<string, unknown>;
+        } catch {
+          logger.warn({ surveyId }, "Failed to parse error.text as JSON");
+        }
+      }
+
+      // Strategy 2: extract the pre-parsed value from the TypeValidationError cause
+      if (!raw && error.cause && typeof error.cause === "object" && "value" in error.cause) {
+        raw = (error.cause as { value: Record<string, unknown> }).value;
+      }
+
+      if (raw) {
+        try {
+          // Fix stringified fields — Bedrock sometimes serialises nested structures as JSON strings
+          const NESTED_FIELDS = ["keyThemes", "sentiment", "keyFindings", "recommendations"] as const;
+          for (const field of NESTED_FIELDS) {
+            if (typeof raw[field] === "string") {
+              raw[field] = JSON.parse(raw[field] as string);
+            }
+          }
+
+          const object = ZStructuredSummary.omit({ metadata: true }).parse(raw);
+
+          const durationMs = Date.now() - startTime;
+          logger.info(
+            { surveyId, durationMs, themesCount: object.keyThemes.length },
+            "AI summary generation completed (fallback parse)"
+          );
+
+          return {
+            ...object,
+            metadata: {
+              totalResponsesAnalyzed: sampled.length,
+              generatedAt: new Date().toISOString(),
+              modelId: MODEL_ID,
+            },
+          };
+        } catch (fallbackError) {
+          logger.error({ fallbackError, surveyId }, "Fallback parse also failed");
+        }
+      }
+    }
+
     const durationMs = Date.now() - startTime;
     const message = error instanceof Error ? error.message : "Unknown AI generation error";
     logger.error({ error, surveyId, durationMs }, "AI summary generation failed");
