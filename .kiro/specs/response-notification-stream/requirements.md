@@ -2,13 +2,15 @@
 
 ## 简介
 
-本功能为 Formbricks 仪表盘构建基于 Server-Sent Events (SSE) 的实时响应通知系统。当调查问卷收到新响应时，系统自动将通知推送到已订阅该环境的仪表盘用户，无需刷新页面。核心采用内存级 pub/sub（EventEmitter）作为 MVP 方案，通过可替换的 `IResponseEventBus` 接口抽象事件总线，便于后续切换到 Redis pub/sub。
+本功能为 Formbricks 仪表盘构建基于 Server-Sent Events (SSE) 的实时响应通知系统。当用户提交调查问卷（`responseFinished`）时，系统自动将通知推送到已订阅该环境的仪表盘用户，无需刷新页面。核心采用内存级 pub/sub（EventEmitter）作为 MVP 方案，通过可替换的 `IResponseEventBus` 接口抽象事件总线，便于后续切换到 Redis pub/sub。
+
+客户端采用浏览器原生 `EventSource` 自动重连机制，无需自定义指数退避或手动重连逻辑。
 
 ## 术语表
 
 - **ResponseEventBus**: 事件总线抽象，负责按 `environmentId` 隔离的事件发布与订阅，MVP 阶段使用 Node.js EventEmitter 实现
 - **SSE_Endpoint**: 基于 Next.js Route Handler 实现的 Server-Sent Events 端点，路径为 `/api/v1/client/[environmentId]/responses/stream`
-- **useResponseStream_Hook**: 客户端 React Hook，管理 EventSource 连接生命周期、自动重连和事件数据消费
+- **useResponseStream_Hook**: 客户端 React Hook，管理 EventSource 连接生命周期和事件数据消费，依赖浏览器原生自动重连
 - **ResponseNotificationProvider**: 仪表盘布局中的通知 Provider 组件，监听 SSE 事件并以 toast 形式展示新响应通知
 - **TResponseEvent**: 服务端事件数据结构，包含 environmentId、surveyId、surveyName、event 类型和响应数据
 - **TStreamEvent**: 客户端事件数据结构，由 SSE 端点序列化后推送给浏览器
@@ -51,25 +53,22 @@
 #### 验收标准
 
 1. 当 SSE 连接成功建立时，SSE_Endpoint 应发送一个 `connected` 事件，包含 `environmentId` 和 `timestamp`
-2. 当 SSE 连接处于活跃状态时，SSE_Endpoint 应每 30 秒发送一次 `heartbeat` 事件以保持连接存活
-3. 当新响应事件到达时，SSE_Endpoint 应发送一个 `response` 事件，包含序列化的 TStreamEvent 数据和 UUIDv7 格式的事件 ID
-4. 当 SSE 连接关闭时（客户端中断或服务器关闭），SSE_Endpoint 应取消事件总线订阅并清除心跳定时器
-5. 当 SSE 连接关闭后，对应环境的 `getSubscriberCount` 应减少 1
-6. SSE_Endpoint 应设置 `Cache-Control: no-cache, no-transform` 和 `X-Accel-Buffering: no` 响应头以防止代理缓冲
+2. 当新响应事件到达时，SSE_Endpoint 应发送一个 `response` 事件，包含序列化的 TStreamEvent 数据和 UUIDv7 格式的事件 ID
+3. 当 SSE 连接关闭时（客户端中断或服务器关闭），SSE_Endpoint 应取消事件总线订阅
+4. 当 SSE 连接关闭后，对应环境的 `getSubscriberCount` 应减少 1
+5. SSE_Endpoint 应设置 `Cache-Control: no-cache, no-transform` 和 `X-Accel-Buffering: no` 响应头以防止代理缓冲
 
-### 需求 4：客户端 SSE 连接与自动重连
+### 需求 4：客户端 SSE 连接
 
-**用户故事：** 作为仪表盘用户，我希望浏览器自动管理 SSE 连接并在断线后自动重连，以确保我不会错过新响应通知。
+**用户故事：** 作为仪表盘用户，我希望浏览器自动管理 SSE 连接，以确保我不会错过新响应通知。
 
 #### 验收标准
 
-1. 当 useResponseStream_Hook 初始化时，连接状态应为 `"connecting"`
-2. 当 SSE 连接成功建立并收到 `connected` 事件时，连接状态应变为 `"connected"`
-3. 当 SSE 连接断开时，useResponseStream_Hook 应使用指数退避策略自动重连，延迟公式为 `min(1000 * 2^retryCount, 30000)`
-4. 当重连成功后，重试计数应重置为 0
-5. 当组件卸载时，useResponseStream_Hook 应关闭 EventSource 连接并清除所有重连定时器
-6. 当收到 `response` 事件时，useResponseStream_Hook 应更新 `lastEvent` 状态
-7. useResponseStream_Hook 应暴露 `reconnect` 函数，允许手动触发重连
+1. 当 useResponseStream_Hook 初始化时，应创建 EventSource 连接
+2. 当 SSE 连接成功建立并收到 `connected` 事件时，连接已就绪
+3. 当组件卸载时，useResponseStream_Hook 应关闭 EventSource 连接
+4. 当收到 `response` 事件时，useResponseStream_Hook 应更新 `lastEvent` 状态
+5. 当 SSE 连接断开时，依赖浏览器原生 EventSource 自动重连机制恢复连接
 
 ### 需求 5：Toast 通知展示
 
@@ -96,14 +95,15 @@
 
 ### 需求 7：Pipeline 集成
 
-**用户故事：** 作为系统开发者，我希望 Pipeline 在处理新响应时自动发布事件到事件总线，以触发实时通知流。
+**用户故事：** 作为系统开发者，我希望 Pipeline 在用户提交调查问卷时自动发布事件到事件总线，以触发实时通知流。
 
 #### 验收标准
 
-1. 当 Pipeline_Route 处理新响应时，应调用 `responseEventBus.publish()` 发布包含完整 TResponseEvent 数据的事件
-2. Pipeline_Route 发布事件时应使用 UUIDv7 作为事件 ID 以保证有序性
-3. 如果 `responseEventBus.publish()` 抛出异常，Pipeline_Route 应捕获并记录错误日志，不应影响 Pipeline 的其他处理流程（webhook、邮件等）
-4. 事件发布应为 fire-and-forget 模式，不应阻塞 Pipeline 的主处理流程
+1. 当 Pipeline_Route 处理 `responseFinished` 事件时，应调用 `responseEventBus.publish()` 发布包含完整 TResponseEvent 数据的事件
+2. 当 Pipeline_Route 处理 `responseCreated` 事件时，不应发布事件到事件总线
+3. Pipeline_Route 发布事件时应使用 UUIDv7 作为事件 ID 以保证有序性
+4. 如果 `responseEventBus.publish()` 抛出异常，Pipeline_Route 应捕获并记录错误日志，不应影响 Pipeline 的其他处理流程（webhook、邮件等）
+5. 事件发布应为 fire-and-forget 模式，不应阻塞 Pipeline 的主处理流程
 
 ### 需求 8：仪表盘布局集成
 

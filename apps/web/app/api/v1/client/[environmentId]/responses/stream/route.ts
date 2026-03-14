@@ -5,8 +5,6 @@ import { authOptions } from "@/modules/auth/lib/authOptions";
 import { responseEventBus } from "@/modules/response-notification/lib/response-event-bus";
 import { TResponseEvent } from "@/modules/response-notification/lib/types";
 
-const HEARTBEAT_INTERVAL_MS = 30_000;
-
 export const dynamic = "force-dynamic";
 
 export async function GET(
@@ -58,13 +56,8 @@ export async function GET(
         );
       });
 
-      const heartbeatTimer = setInterval(() => {
-        send("heartbeat", { timestamp: new Date().toISOString() });
-      }, HEARTBEAT_INTERVAL_MS);
-
       request.signal.addEventListener("abort", () => {
         unsubscribe();
-        clearInterval(heartbeatTimer);
         try {
           controller.close();
         } catch {

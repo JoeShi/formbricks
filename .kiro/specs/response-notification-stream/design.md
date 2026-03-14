@@ -2,23 +2,24 @@
 
 ## 概述
 
-本功能为 Formbricks 仪表盘构建基于 Server-Sent Events (SSE) 的实时通知系统。当调查问卷收到新响应时，系统自动将通知推送到已订阅该环境的仪表盘用户，无需刷新页面。
+本功能为 Formbricks 仪表盘构建基于 Server-Sent Events (SSE) 的实时通知系统。当用户提交调查问卷（`responseFinished`）时，系统自动将通知推送到已订阅该环境的仪表盘用户，无需刷新页面。
 
 核心设计采用内存级 pub/sub（EventEmitter）作为 MVP 方案，通过可替换的 `ResponseEventBus` 接口抽象事件总线，便于后续切换到 Redis pub/sub。SSE 端点通过 Next.js Route Handler 实现，客户端通过 `useResponseStream` React Hook 消费事件流，并在仪表盘中以 toast 通知形式展示新响应。
 
 ### 设计目标
 
-- 零刷新体验：新响应到达后自动推送通知到仪表盘
+- 零刷新体验：新响应提交后自动推送通知到仪表盘
 - 环境隔离：严格按 `environmentId` 隔离通知，符合多租户架构
 - 可替换的事件总线：MVP 使用 EventEmitter，接口设计支持无缝切换到 Redis pub/sub
 - 安全性：SSE 端点验证 next-auth 会话并检查环境访问权限
-- 健壮性：支持断线重连（Last-Event-ID）、心跳保活、优雅关闭
+- 简洁性：依赖浏览器原生 EventSource 自动重连，无需自定义重连逻辑
 
 ### 技术选型理由
 
 - **SSE over WebSocket**: 单向推送场景，SSE 更轻量，无需额外服务器，Next.js Route Handler 原生支持
 - **EventEmitter**: Node.js 内置，零依赖，MVP 阶段足够，通过接口抽象可替换
 - **react-hot-toast**: 项目已全局使用，无需引入新 UI 库
+- **浏览器原生重连**: EventSource 内置自动重连机制，无需自定义指数退避逻辑
 
 ## 架构
 
@@ -27,17 +28,19 @@
 ```mermaid
 graph TD
     A[Survey Response 提交] --> B[Pipeline Route Handler]
-    B --> C[ResponseEventBus.publish]
-    C --> D{EventEmitter<br/>按 environmentId 分发}
-    D --> E[SSE Connection 1]
-    D --> F[SSE Connection 2]
-    D --> G[SSE Connection N]
-    E --> H[Dashboard Client 1<br/>useResponseStream Hook]
-    F --> I[Dashboard Client 2<br/>useResponseStream Hook]
-    G --> J[Dashboard Client N<br/>useResponseStream Hook]
-    H --> K[Toast 通知]
-    I --> L[Toast 通知]
+    B --> C{event === responseFinished?}
+    C -->|是| D[ResponseEventBus.publish]
+    C -->|否| E[跳过发布]
+    D --> F{EventEmitter<br/>按 environmentId 分发}
+    F --> G[SSE Connection 1]
+    F --> H[SSE Connection 2]
+    F --> I[SSE Connection N]
+    G --> J[Dashboard Client 1<br/>useResponseStream Hook]
+    H --> K[Dashboard Client 2<br/>useResponseStream Hook]
+    I --> L[Dashboard Client N<br/>useResponseStream Hook]
     J --> M[Toast 通知]
+    K --> N[Toast 通知]
+    L --> O[Toast 通知]
 ```
 
 ### 数据流时序图
@@ -56,23 +59,19 @@ sequenceDiagram
     SSE->>SSE: 验证 session + 环境权限
     SSE->>Bus: subscribe(environmentId, callback)
     SSE-->>Client: HTTP 200 (text/event-stream)
+    SSE-->>Client: event: connected
 
-    Note over SSE,Client: 2. 心跳保活 (每 30 秒)
-    loop 每 30 秒
-        SSE-->>Client: event: heartbeat\ndata: {"timestamp": ...}
-    end
-
-    Note over Survey,Toast: 3. 新响应到达
-    Survey->>Pipeline: POST /api/pipeline
+    Note over Survey,Toast: 2. 用户提交调查问卷
+    Survey->>Pipeline: POST /api/pipeline (event=responseFinished)
     Pipeline->>Bus: publish(environmentId, responseEvent)
     Bus->>SSE: callback(responseEvent)
     SSE-->>Client: id: {eventId}\nevent: response\ndata: {...}
     Client->>Toast: 显示通知 (调查名 + 响应预览)
 
-    Note over Client,SSE: 4. 断线重连
-    Client->>SSE: GET ...stream (Last-Event-ID: {lastId})
+    Note over Client,SSE: 3. 断线自动重连 (浏览器原生)
+    Client->>SSE: GET ...stream (浏览器自动重连)
     SSE->>SSE: 验证 session + 权限
-    SSE-->>Client: 从 lastId 之后继续推送
+    SSE-->>Client: event: connected
 ```
 
 ## 组件与接口
@@ -94,7 +93,6 @@ apps/web/app/api/v1/client/[environmentId]/responses/stream/
 └── route.ts                         # SSE Route Handler
 ```
 
-
 ### 组件 1: ResponseEventBus（事件总线）
 
 **用途**: 抽象事件发布/订阅机制，解耦 Pipeline 与 SSE 连接
@@ -111,7 +109,7 @@ export interface TResponseEvent {
   environmentId: string;
   surveyId: string;
   surveyName: string;
-  event: "responseCreated" | "responseFinished";
+  event: "responseFinished";
   response: Pick<TResponse, "id" | "createdAt" | "data" | "finished">;
   timestamp: Date;
 }
@@ -168,7 +166,7 @@ export const responseEventBus: IResponseEventBus = new EventEmitterBus();
 
 ### 组件 2: SSE Route Handler
 
-**用途**: 提供 SSE 端点，验证身份后建立长连接，推送事件流
+**用途**: 提供 SSE 端点，验证身份后建立长连接，推送事件流。无心跳机制，依赖浏览器原生 EventSource 自动重连。
 
 **接口**:
 
@@ -177,13 +175,10 @@ export const responseEventBus: IResponseEventBus = new EventEmitterBus();
 
 import { getServerSession } from "next-auth";
 import { v7 as uuidv7 } from "uuid";
-import { logger } from "@formbricks/logger";
 import { authOptions } from "@/modules/auth/lib/authOptions";
 import { hasUserEnvironmentAccess } from "@/lib/environment/auth";
 import { responseEventBus } from "@/modules/response-notification/lib/response-event-bus";
 import { TResponseEvent } from "@/modules/response-notification/lib/types";
-
-const HEARTBEAT_INTERVAL_MS = 30_000;
 
 export const dynamic = "force-dynamic";
 
@@ -205,10 +200,7 @@ export async function GET(
     return new Response("Forbidden", { status: 403 });
   }
 
-  // 3. Parse Last-Event-ID for reconnection
-  const lastEventId = request.headers.get("Last-Event-ID");
-
-  // 4. Create SSE stream
+  // 3. Create SSE stream
   const stream = new ReadableStream({
     start(controller) {
       const encoder = new TextEncoder();
@@ -243,15 +235,9 @@ export async function GET(
         }, event.id);
       });
 
-      // Heartbeat to keep connection alive
-      const heartbeatTimer = setInterval(() => {
-        send("heartbeat", { timestamp: new Date().toISOString() });
-      }, HEARTBEAT_INTERVAL_MS);
-
       // Cleanup on close
       request.signal.addEventListener("abort", () => {
         unsubscribe();
-        clearInterval(heartbeatTimer);
         try {
           controller.close();
         } catch {
@@ -278,12 +264,11 @@ export async function GET(
 
 **后置条件**:
 - 返回 `text/event-stream` 响应
-- 连接关闭时自动取消订阅并清理定时器
-- 心跳每 30 秒发送一次
+- 连接关闭时自动取消订阅
 
 ### 组件 3: useResponseStream Hook
 
-**用途**: 客户端 React Hook，管理 SSE 连接生命周期，提供事件数据和连接状态
+**用途**: 客户端 React Hook，管理 SSE 连接生命周期，提供事件数据。依赖浏览器原生 EventSource 自动重连。
 
 **接口**:
 
@@ -292,115 +277,41 @@ export async function GET(
 
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { TStreamEvent } from "../lib/types";
 
-export type TStreamEvent = {
-  id: string;
-  surveyId: string;
-  surveyName: string;
-  event: "responseCreated" | "responseFinished";
-  responseId: string;
-  responseData: Record<string, string | number | string[]>;
-  finished: boolean;
-  createdAt: string;
-};
-
-export type TConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
-
-export interface TUseResponseStreamReturn {
-  lastEvent: TStreamEvent | null;
-  connectionStatus: TConnectionStatus;
-  reconnect: () => void;
-}
-
-const MAX_RETRY_DELAY_MS = 30_000;
-const INITIAL_RETRY_DELAY_MS = 1_000;
-
-export const useResponseStream = (environmentId: string): TUseResponseStreamReturn => {
+export const useResponseStream = (environmentId: string): { lastEvent: TStreamEvent | null } => {
   const [lastEvent, setLastEvent] = useState<TStreamEvent | null>(null);
-  const [connectionStatus, setConnectionStatus] = useState<TConnectionStatus>("connecting");
   const eventSourceRef = useRef<EventSource | null>(null);
-  const lastEventIdRef = useRef<string | null>(null);
-  const retryCountRef = useRef(0);
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const connect = useCallback(() => {
-    // Close existing connection
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-    }
-
+  useEffect(() => {
     const url = new URL(
       `/api/v1/client/${environmentId}/responses/stream`,
       window.location.origin
     );
 
-    // Note: EventSource does not support custom headers.
-    // Last-Event-ID is automatically sent by the browser on reconnection.
     const eventSource = new EventSource(url.toString());
     eventSourceRef.current = eventSource;
-    setConnectionStatus("connecting");
-
-    eventSource.addEventListener("connected", () => {
-      setConnectionStatus("connected");
-      retryCountRef.current = 0;
-    });
 
     eventSource.addEventListener("response", (e: MessageEvent) => {
       const data = JSON.parse(e.data) as TStreamEvent;
-      lastEventIdRef.current = e.lastEventId;
       setLastEvent(data);
     });
 
-    eventSource.addEventListener("heartbeat", () => {
-      // Heartbeat received — connection is alive
-    });
-
-    eventSource.onerror = () => {
+    return () => {
       eventSource.close();
-      setConnectionStatus("disconnected");
-
-      // Exponential backoff reconnection
-      const delay = Math.min(
-        INITIAL_RETRY_DELAY_MS * Math.pow(2, retryCountRef.current),
-        MAX_RETRY_DELAY_MS
-      );
-      retryCountRef.current += 1;
-
-      retryTimerRef.current = setTimeout(() => {
-        connect();
-      }, delay);
     };
   }, [environmentId]);
 
-  const reconnect = useCallback(() => {
-    retryCountRef.current = 0;
-    connect();
-  }, [connect]);
-
-  useEffect(() => {
-    connect();
-
-    return () => {
-      // Graceful cleanup on unmount
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current);
-      }
-    };
-  }, [connect]);
-
-  return { lastEvent, connectionStatus, reconnect };
+  return { lastEvent };
 };
 ```
 
 **职责**:
 - 建立和管理 EventSource 连接
-- 指数退避自动重连
+- 浏览器原生自动重连（无需自定义逻辑）
 - 组件卸载时优雅关闭连接
-- 暴露 `lastEvent`、`connectionStatus`、`reconnect`
+- 暴露 `lastEvent`
 
 ### 组件 4: ResponseNotificationProvider
 
@@ -414,24 +325,12 @@ export const useResponseStream = (environmentId: string): TUseResponseStreamRetu
 import { useEffect } from "react";
 import toast from "react-hot-toast";
 import { useTranslation } from "react-i18next";
-import { useResponseStream, TStreamEvent } from "../hooks/useResponseStream";
+import { useResponseStream } from "../hooks/useResponseStream";
+import { formatResponsePreview } from "../lib/types";
 
 interface ResponseNotificationProviderProps {
   environmentId: string;
 }
-
-const truncate = (text: string, maxLength: number = 80): string => {
-  if (text.length <= maxLength) return text;
-  return text.slice(0, maxLength) + "...";
-};
-
-const formatResponsePreview = (data: TStreamEvent["responseData"]): string => {
-  const entries = Object.entries(data);
-  if (entries.length === 0) return "";
-  const [, firstValue] = entries[0];
-  const valueStr = Array.isArray(firstValue) ? firstValue.join(", ") : String(firstValue);
-  return truncate(valueStr);
-};
 
 export const ResponseNotificationProvider = ({ environmentId }: ResponseNotificationProviderProps) => {
   const { lastEvent } = useResponseStream(environmentId);
@@ -457,13 +356,12 @@ export const ResponseNotificationProvider = ({ environmentId }: ResponseNotifica
 
 ### SSE 事件格式
 
-SSE 端点发送三种事件类型：
+SSE 端点发送两种事件类型：
 
 | 事件类型 | 触发条件 | 数据格式 |
 |---------|---------|---------|
 | `connected` | 连接建立成功 | `{ environmentId, timestamp }` |
-| `response` | 新响应到达 | `TStreamEvent` (见下方) |
-| `heartbeat` | 每 30 秒 | `{ timestamp }` |
+| `response` | 新响应提交完成 | `TStreamEvent` (见下方) |
 
 ### TResponseEvent（服务端事件）
 
@@ -473,7 +371,7 @@ interface TResponseEvent {
   environmentId: string;
   surveyId: string;
   surveyName: string;
-  event: "responseCreated" | "responseFinished";
+  event: "responseFinished";
   response: Pick<TResponse, "id" | "createdAt" | "data" | "finished">;
   timestamp: Date;
 }
@@ -486,7 +384,7 @@ interface TStreamEvent {
   id: string;
   surveyId: string;
   surveyName: string;
-  event: "responseCreated" | "responseFinished";
+  event: "responseFinished";
   responseId: string;
   responseData: Record<string, string | number | string[]>;
   finished: boolean;
@@ -496,28 +394,30 @@ interface TStreamEvent {
 
 ### Pipeline 集成点
 
-在 `apps/web/app/api/(internal)/pipeline/route.ts` 的 `POST` 处理函数中，在现有处理逻辑之后添加事件发布：
+在 `apps/web/app/api/(internal)/pipeline/route.ts` 的 `POST` 处理函数中，仅在 `event === "responseFinished"` 时发布事件：
 
 ```typescript
-// After existing pipeline processing, publish to event bus
-import { responseEventBus } from "@/modules/response-notification/lib/response-event-bus";
-import { v7 as uuidv7 } from "uuid";
-
-// Inside POST handler, after survey is fetched:
-responseEventBus.publish({
-  id: uuidv7(),
-  environmentId,
-  surveyId,
-  surveyName: survey.name,
-  event,
-  response: {
-    id: response.id,
-    createdAt: response.createdAt,
-    data: response.data,
-    finished: response.finished ?? false,
-  },
-  timestamp: new Date(),
-});
+// Only publish on responseFinished (not responseCreated)
+if (event === "responseFinished") {
+  try {
+    responseEventBus.publish({
+      id: uuidv7(),
+      environmentId,
+      surveyId,
+      surveyName: survey.name,
+      event,
+      response: {
+        id: response.id,
+        createdAt: response.createdAt,
+        data: response.data,
+        finished: response.finished ?? false,
+      },
+      timestamp: new Date(),
+    });
+  } catch (error) {
+    logger.error({ error }, "Failed to publish response event to SSE bus");
+  }
+}
 ```
 
 ## 关键函数的形式化规格
@@ -572,15 +472,14 @@ async function GET(request: Request, { params }): Promise<Response>
 - 无有效 session → 返回 HTTP 401
 - 有 session 但无环境权限 → 返回 HTTP 403
 - 认证通过 → 返回 HTTP 200，Content-Type 为 `text/event-stream`
-- 连接关闭时，事件总线订阅被清理，心跳定时器被清除
+- 连接关闭时，事件总线订阅被清理
 
-**循环不变量**:
-- 心跳循环：每次迭代间隔恒为 30 秒，且连接未关闭
+**循环不变量**: 不适用
 
 ### 函数 4: `useResponseStream(environmentId)`
 
 ```typescript
-function useResponseStream(environmentId: string): TUseResponseStreamReturn
+function useResponseStream(environmentId: string): { lastEvent: TStreamEvent | null }
 ```
 
 **前置条件**:
@@ -588,14 +487,11 @@ function useResponseStream(environmentId: string): TUseResponseStreamReturn
 - 在 React 组件树中调用
 
 **后置条件**:
-- 初始 `connectionStatus` 为 `"connecting"`
-- 连接成功后 `connectionStatus` 变为 `"connected"`
-- 连接断开后自动重连，使用指数退避策略
-- 组件卸载时 EventSource 被关闭，定时器被清除
+- 组件卸载时 EventSource 被关闭
 - 每次收到 `response` 事件时 `lastEvent` 更新
+- 断线重连由浏览器原生 EventSource 机制处理
 
-**循环不变量**:
-- 重连循环：重试延迟 = min(1000 * 2^retryCount, 30000)，单调递增直到上限
+**循环不变量**: 不适用
 
 ### 函数 5: `formatResponsePreview(data)`
 
@@ -646,66 +542,13 @@ BEGIN
     send("response", serializeEvent(event), event.id)
   )
 
-  // Step 6: Start heartbeat
-  heartbeatTimer ← setInterval(30000, () =>
-    send("heartbeat", { timestamp: now() })
-  )
-
-  // Step 7: Cleanup on abort
+  // Step 6: Cleanup on abort
   ON request.signal.abort DO
     unsubscribe()
-    clearInterval(heartbeatTimer)
     stream.close()
   END ON
 
   RETURN Response(stream, headers: { "Content-Type": "text/event-stream" })
-END
-```
-
-### 客户端重连算法
-
-```pascal
-ALGORITHM clientReconnection(environmentId)
-INPUT: environmentId: string
-OUTPUT: managed EventSource connection
-
-BEGIN
-  retryCount ← 0
-  INITIAL_DELAY ← 1000
-  MAX_DELAY ← 30000
-
-  PROCEDURE connect()
-    eventSource ← new EventSource(buildUrl(environmentId))
-    connectionStatus ← "connecting"
-
-    ON eventSource."connected" DO
-      connectionStatus ← "connected"
-      retryCount ← 0
-    END ON
-
-    ON eventSource."response" DO (event)
-      lastEvent ← parse(event.data)
-    END ON
-
-    ON eventSource.error DO
-      eventSource.close()
-      connectionStatus ← "disconnected"
-
-      // Exponential backoff with cap
-      delay ← min(INITIAL_DELAY × 2^retryCount, MAX_DELAY)
-      retryCount ← retryCount + 1
-
-      ASSERT delay ≤ MAX_DELAY
-      setTimeout(delay, connect)
-    END ON
-  END PROCEDURE
-
-  connect()
-
-  ON component.unmount DO
-    eventSource.close()
-    clearTimeout(retryTimer)
-  END ON
 END
 ```
 
@@ -715,7 +558,6 @@ END
 
 ```typescript
 // apps/web/app/(app)/environments/[environmentId]/layout.tsx
-// Add ResponseNotificationProvider inside the layout
 
 import { ResponseNotificationProvider } from "@/modules/response-notification/components/ResponseNotificationProvider";
 
@@ -741,35 +583,31 @@ export default async function EnvironmentLayout({
 
 ```typescript
 // In apps/web/app/api/(internal)/pipeline/route.ts
-// After fetching survey and before webhook processing:
+// Only publish on responseFinished
 
-import { responseEventBus } from "@/modules/response-notification/lib/response-event-bus";
-import { v7 as uuidv7 } from "uuid";
-
-// Publish to SSE event bus (non-blocking, fire-and-forget)
-try {
-  responseEventBus.publish({
-    id: uuidv7(),
-    environmentId,
-    surveyId,
-    surveyName: survey.name,
-    event,
-    response: {
-      id: response.id,
-      createdAt: response.createdAt,
-      data: response.data,
-      finished: response.finished ?? false,
-    },
-    timestamp: new Date(),
-  });
-} catch (error) {
-  logger.error({ error }, "Failed to publish response event to SSE bus");
+if (event === "responseFinished") {
+  try {
+    responseEventBus.publish({
+      id: uuidv7(),
+      environmentId,
+      surveyId,
+      surveyName: survey.name,
+      event,
+      response: {
+        id: response.id,
+        createdAt: response.createdAt,
+        data: response.data,
+        finished: response.finished ?? false,
+      },
+      timestamp: new Date(),
+    });
+  } catch (error) {
+    logger.error({ error }, "Failed to publish response event to SSE bus");
+  }
 }
 ```
 
 ## 正确性属性
-
-*属性（Property）是指在系统所有有效执行中都应保持为真的特征或行为——本质上是关于系统应该做什么的形式化声明。属性是人类可读规格与机器可验证正确性保证之间的桥梁。*
 
 ### Property 1: 环境隔离性
 
@@ -789,19 +627,13 @@ try {
 
 **Validates: Requirement 1.7**
 
-### Property 4: 重连退避上界
-
-*For any* sequence of reconnection attempts, the retry delay must never exceed `MAX_RETRY_DELAY_MS` (30,000ms), and must follow the formula `min(1000 * 2^retryCount, 30000)`.
-
-**Validates: Requirement 4.3**
-
-### Property 5: 响应预览截断
+### Property 4: 响应预览截断
 
 *For any* input to `formatResponsePreview`, the returned string length must be ≤ 83 characters (80 content + 3 for "..."). Empty input must return an empty string.
 
 **Validates: Requirements 6.1, 6.4**
 
-### Property 6: 响应预览格式化正确性
+### Property 5: 响应预览格式化正确性
 
 *For any* non-empty response data record, `formatResponsePreview` must return a string representation of the first field's value. When the first field's value is an array, the elements must be joined with `", "`.
 
@@ -813,20 +645,24 @@ try {
 
 | 错误场景 | 处理方式 | 用户影响 |
 |---------|---------|---------|
-| 未认证请求 | 返回 HTTP 401 | EventSource 触发 error，Hook 进入重连 |
-| 无环境权限 | 返回 HTTP 403 | EventSource 触发 error，Hook 进入重连 |
-| SSE 连接断开 | 客户端指数退避重连 | 短暂无通知，自动恢复 |
+| 未认证请求 | 返回 HTTP 401 | EventSource 触发 error，浏览器自动重连 |
+| 无环境权限 | 返回 HTTP 403 | EventSource 触发 error，浏览器自动重连 |
+| SSE 连接断开 | 浏览器原生 EventSource 自动重连 | 短暂无通知，自动恢复 |
 | Pipeline 发布失败 | try-catch 捕获，记录日志 | 不影响 Pipeline 主流程 |
 | EventSource 不支持 | 浏览器兼容性检查 | 降级为无实时通知 |
-| 服务器重启 | 所有连接断开，客户端自动重连 | 短暂中断后恢复 |
+| 服务器重启 | 所有连接断开，浏览器自动重连 | 短暂中断后恢复 |
 
 ### 关键设计决策
 
-1. **事件发布是 fire-and-forget**: Pipeline 中的 `responseEventBus.publish()` 不应阻塞或影响主流程。即使发布失败，Pipeline 的其他处理（webhook、邮件等）仍正常执行。
+1. **仅在 responseFinished 时发布**: Pipeline 中仅在用户完成提交时发布事件，`responseCreated` 不触发通知，减少噪音。
 
-2. **SSE 端点不做事件持久化**: MVP 阶段不存储历史事件。`Last-Event-ID` 仅用于浏览器原生重连机制，服务端不回放历史事件。后续可通过 Redis Streams 实现事件回放。
+2. **事件发布是 fire-and-forget**: Pipeline 中的 `responseEventBus.publish()` 不应阻塞或影响主流程。即使发布失败，Pipeline 的其他处理（webhook、邮件等）仍正常执行。
 
-3. **心跳防止代理超时**: 许多反向代理（Nginx、Cloudflare）会在无数据传输时关闭长连接。30 秒心跳确保连接存活。
+3. **SSE 端点不做事件持久化**: MVP 阶段不存储历史事件。`Last-Event-ID` 仅用于浏览器原生重连机制，服务端不回放历史事件。
+
+4. **无心跳机制**: 简化实现，依赖浏览器原生 EventSource 自动重连。如果代理超时断开连接，浏览器会自动重新建立连接。
+
+5. **无自定义重连逻辑**: 移除指数退避、重试计数等复杂逻辑，完全依赖浏览器内置的 EventSource 重连机制。
 
 ## 测试策略
 
@@ -853,9 +689,8 @@ try {
 1. **Property 1**: 环境隔离性 — 生成随机 environmentId 对，验证事件不跨环境泄漏
 2. **Property 2**: 订阅生命周期一致性 — 生成随机 subscribe/unsubscribe 序列，验证计数和回调行为
 3. **Property 3**: 取消订阅幂等性 — 多次调用 unsubscribe，验证无异常
-4. **Property 4**: 重连退避上界 — 生成随机 retryCount，验证延迟公式
-5. **Property 5**: 响应预览截断 — 生成随机字符串，验证长度约束
-6. **Property 6**: 响应预览格式化正确性 — 生成随机响应数据，验证格式化行为
+4. **Property 4**: 响应预览截断 — 生成随机字符串，验证长度约束
+5. **Property 5**: 响应预览格式化正确性 — 生成随机响应数据，验证格式化行为
 
 ### 集成测试要点
 
@@ -869,7 +704,6 @@ try {
 - **事件分发延迟**: EventEmitter 同步分发，微秒级
 - **SSE 连接数**: Node.js 默认支持数千并发连接，50/环境远在安全范围内
 - **Pipeline 影响**: `publish()` 是同步操作，不增加 Pipeline 响应时间
-- **心跳开销**: 每连接每 30 秒一个小 JSON，带宽可忽略
 
 ## 安全考量
 

@@ -5,7 +5,7 @@ export interface TResponseEvent {
   environmentId: string;
   surveyId: string;
   surveyName: string;
-  event: "responseCreated" | "responseFinished";
+  event: "responseFinished";
   response: Pick<TResponse, "id" | "createdAt" | "data" | "finished">;
   timestamp: Date;
 }
@@ -22,14 +22,12 @@ export type TStreamEvent = {
   id: string;
   surveyId: string;
   surveyName: string;
-  event: "responseCreated" | "responseFinished";
+  event: "responseFinished";
   responseId: string;
   responseData: Record<string, string | number | string[]>;
   finished: boolean;
   createdAt: string;
 };
-
-export type TConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
 
 const truncate = (text: string, maxLength: number = 80): string => {
   if (text.length <= maxLength) return text;

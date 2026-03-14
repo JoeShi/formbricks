@@ -76,24 +76,26 @@ export const POST = async (request: Request) => {
     return responses.badRequestResponse("Survey not found in this environment");
   }
 
-  // Publish to SSE event bus (non-blocking, fire-and-forget)
-  try {
-    responseEventBus.publish({
-      id: uuidv7(),
-      environmentId,
-      surveyId,
-      surveyName: survey.name,
-      event,
-      response: {
-        id: response.id,
-        createdAt: response.createdAt,
-        data: response.data,
-        finished: response.finished ?? false,
-      },
-      timestamp: new Date(),
-    });
-  } catch (error) {
-    logger.error({ error }, "Failed to publish response event to SSE bus");
+  // Publish to SSE event bus only on responseFinished (non-blocking, fire-and-forget)
+  if (event === "responseFinished") {
+    try {
+      responseEventBus.publish({
+        id: uuidv7(),
+        environmentId,
+        surveyId,
+        surveyName: survey.name,
+        event,
+        response: {
+          id: response.id,
+          createdAt: response.createdAt,
+          data: response.data,
+          finished: response.finished ?? false,
+        },
+        timestamp: new Date(),
+      });
+    } catch (error) {
+      logger.error({ error }, "Failed to publish response event to SSE bus");
+    }
   }
 
   // Fetch webhooks
