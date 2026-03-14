@@ -20,6 +20,7 @@ import { queueAuditEvent } from "@/modules/ee/audit-logs/lib/handler";
 import { TAuditStatus, UNKNOWN_DATA } from "@/modules/ee/audit-logs/types/audit-log";
 import { recordResponseCreatedMeterEvent } from "@/modules/ee/billing/lib/metering";
 import { sendResponseFinishedEmail } from "@/modules/email";
+import { responseEventBus } from "@/modules/response-notification/lib/response-event-bus";
 import { resolveStorageUrlsInObject } from "@/modules/storage/utils";
 import { sendFollowUpsForResponse } from "@/modules/survey/follow-ups/lib/follow-ups";
 import { FollowUpSendError } from "@/modules/survey/follow-ups/types/follow-up";
@@ -73,6 +74,26 @@ export const POST = async (request: Request) => {
       `Survey ${surveyId} does not belong to environment ${environmentId}`
     );
     return responses.badRequestResponse("Survey not found in this environment");
+  }
+
+  // Publish to SSE event bus (non-blocking, fire-and-forget)
+  try {
+    responseEventBus.publish({
+      id: uuidv7(),
+      environmentId,
+      surveyId,
+      surveyName: survey.name,
+      event,
+      response: {
+        id: response.id,
+        createdAt: response.createdAt,
+        data: response.data,
+        finished: response.finished ?? false,
+      },
+      timestamp: new Date(),
+    });
+  } catch (error) {
+    logger.error({ error }, "Failed to publish response event to SSE bus");
   }
 
   // Fetch webhooks

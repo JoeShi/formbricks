@@ -4,6 +4,7 @@ import { EnvironmentLayout } from "@/app/(app)/environments/[environmentId]/comp
 import { EnvironmentContextWrapper } from "@/app/(app)/environments/[environmentId]/context/environment-context";
 import { authOptions } from "@/modules/auth/lib/authOptions";
 import { getEnvironmentLayoutData } from "@/modules/environments/lib/utils";
+import { ResponseNotificationProvider } from "@/modules/response-notification/components/ResponseNotificationProvider";
 import EnvironmentStorageHandler from "./components/EnvironmentStorageHandler";
 
 const EnvLayout = async (props: {
@@ -25,6 +26,7 @@ const EnvLayout = async (props: {
   return (
     <>
       <EnvironmentStorageHandler environmentId={params.environmentId} />
+      <ResponseNotificationProvider environmentId={params.environmentId} />
       <EnvironmentContextWrapper
         environment={layoutData.environment}
         project={layoutData.project}
